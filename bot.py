@@ -92,13 +92,19 @@ def fetch_posts(url: str) -> list[dict]:
         if not post_id.isdigit():
             continue
 
-        # 말머리 (갤러리마다 위치 다를 수 있어 두 셀렉터 시도)
+        # 말머리: 가장 안쪽 자식 태그 우선, 없으면 td 직접 텍스트
         prefix = ""
-        for sel in ("td.gall_subject", "td.gall_tit em.subject"):
-            tag = row.select_one(sel)
-            if tag:
-                prefix = tag.get_text(strip=True)
-                break
+        subject_td = row.select_one("td.gall_subject")
+        if subject_td:
+            inner = subject_td.find(True)  # 첫 번째 자식 태그
+            if inner:
+                prefix = inner.get_text(strip=True)
+            else:
+                prefix = subject_td.get_text(strip=True)
+        else:
+            em = row.select_one("td.gall_tit em.subject")
+            if em:
+                prefix = em.get_text(strip=True)
 
         # 제목 & 링크
         title_a = row.select_one("td.gall_tit a:not(.reply_numbox)")
@@ -119,12 +125,11 @@ def fetch_posts(url: str) -> list[dict]:
 # ── 텔레그램 알림 ─────────────────────────
 
 def send_alert(nick: str, post: dict):
-    label = f"[{post['prefix']}] " if post["prefix"] else ""
     text = (
         f"🔔 *새 글 알림*\n\n"
         f"👤 *{nick}*\n"
         f"🏷 말머리: {post['prefix'] or '없음'}\n"
-        f"📝 {label}{post['title']}\n\n"
+        f"📝 {post['title']}\n\n"
         f"[→ 글 보러가기]({post['link']})"
     )
     try:
