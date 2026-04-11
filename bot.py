@@ -3,10 +3,6 @@ bot.py
 ======
 디시인사이드 차트분석 마이너 갤러리 감시 봇
 GitHub Actions 원샷 방식으로 실행
-
-감시 규칙:
-  1. 워뇨띠  → 작성자 검색 결과의 모든 새 글 알림
-  2. 야신난다 → 작성자 검색 결과 중 말머리가 '차트/' 인 글만 알림
 """
 
 import os
@@ -16,7 +12,6 @@ import requests
 from pathlib import Path
 from bs4 import BeautifulSoup
 
-# ── 설정 (GitHub Secrets → 환경변수) ─────
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 SEEN_IDS_FILE    = "seen_ids.json"
@@ -25,15 +20,16 @@ TARGETS = [
     {
         "nick":          "워뇨띠",
         "search_url":    "https://gall.dcinside.com/mgallery/board/lists/?id=chartanalysis&s_type=search_name&s_keyword=%EC%9B%8C%EB%87%A8%EB%9D%A0",
-        "prefix_filter": None,   # None = 모든 글 알림
+        "prefix_filter": None,
+        "exact_nick":    True,   # 닉네임 완전 일치만 알림 (부분 일치 오탐 방지)
     },
     {
         "nick":          "야신난다",
         "search_url":    "https://gall.dcinside.com/mgallery/board/lists/?id=chartanalysis&s_type=search_name&s_keyword=%EC%95%BC%EC%8B%A0%EB%82%9C%EB%8B%A4",
-        "prefix_filter": "차트/",  # 말머리가 '차트/'로 시작하는 글만
+        "prefix_filter": "차트/",
+        "exact_nick":    False,
     },
 ]
-# ─────────────────────────────────────────
 
 HEADERS = {
     "User-Agent": (
@@ -45,14 +41,9 @@ HEADERS = {
     "Accept-Language": "ko-KR,ko;q=0.9",
 }
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
 
-
-# ── seen_ids 관리 ─────────────────────────
 
 def load_seen() -> set:
     p = Path(SEEN_IDS_FILE)
@@ -70,8 +61,6 @@ def save_seen(seen: set):
         json.dump(ids, f, ensure_ascii=False)
 
 
-# ── 페이지 파싱 ───────────────────────────
-
 def fetch_posts(url: str) -> list[dict]:
     try:
         r = requests.get(url, headers=HEADERS, timeout=15)
@@ -84,7 +73,6 @@ def fetch_posts(url: str) -> list[dict]:
     posts = []
 
     for row in soup.select("tr.ub-content"):
-        # 숫자 번호가 아니면 공지 등 → 스킵
         num_td = row.select_one("td.gall_num")
         if not num_td:
             continue
@@ -92,15 +80,12 @@ def fetch_posts(url: str) -> list[dict]:
         if not post_id.isdigit():
             continue
 
-        # 말머리: 가장 안쪽 자식 태그 우선, 없으면 td 직접 텍스트
+        # 말머리
         prefix = ""
         subject_td = row.select_one("td.gall_subject")
         if subject_td:
-            inner = subject_td.find(True)  # 첫 번째 자식 태그
-            if inner:
-                prefix = inner.get_text(strip=True)
-            else:
-                prefix = subject_td.get_text(strip=True)
+            inner = subject_td.find(True)
+            prefix = inner.get_text(strip=True) if inner else subject_td.get_text(strip=True)
         else:
             em = row.select_one("td.gall_tit em.subject")
             if em:
@@ -112,17 +97,23 @@ def fetch_posts(url: str) -> list[dict]:
         href  = title_a.get("href", "")       if title_a else ""
         link  = f"https://gall.dcinside.com{href}" if href.startswith("/") else href
 
+        # 작성자 닉네임 — data-nick 우선, 없으면 텍스트
+        writer_td = row.select_one("td.gall_writer")
+        if writer_td:
+            author = writer_td.get("data-nick") or writer_td.get_text(strip=True)
+        else:
+            author = ""
+
         posts.append({
             "id":     post_id,
             "prefix": prefix,
             "title":  title,
             "link":   link,
+            "author": author,
         })
 
     return posts
 
-
-# ── 텔레그램 알림 ─────────────────────────
 
 def send_alert(nick: str, post: dict):
     text = (
@@ -149,8 +140,6 @@ def send_alert(nick: str, post: dict):
         log.error(f"❌ 텔레그램 전송 실패: {e}")
 
 
-# ── 메인 ──────────────────────────────────
-
 def main():
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         log.error("TELEGRAM_TOKEN 또는 TELEGRAM_CHAT_ID 환경변수 없음")
@@ -164,6 +153,7 @@ def main():
     for target in TARGETS:
         nick    = target["nick"]
         filter_ = target["prefix_filter"]
+        exact   = target.get("exact_nick", False)
         posts   = fetch_posts(target["search_url"])
         log.info(f"[{nick}] 수집: {len(posts)}건")
 
@@ -172,7 +162,12 @@ def main():
                 continue
             seen.add(post["id"])
 
-            # 말머리 필터 (None이면 무조건 통과)
+            # 닉네임 완전 일치 필터
+            if exact and post["author"] != nick:
+                log.debug(f"닉네임 불일치 스킵: {post['author']} (기대: {nick})")
+                continue
+
+            # 말머리 필터
             if filter_ is not None and not post["prefix"].startswith(filter_):
                 continue
 
